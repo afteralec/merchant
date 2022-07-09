@@ -209,7 +209,7 @@ pub enum ResourceEvent<T>
 where
     T: Send + Sync + fmt::Debug,
 {
-    Get(i64, tokio::sync::oneshot::Sender<ResourceEvent<T>>),
+    Get(u64, tokio::sync::oneshot::Sender<ResourceEvent<T>>),
     GetSuccess(T),
     GetFail,
     Insert,
