@@ -2,7 +2,7 @@ pub mod error;
 
 use futures::{stream, StreamExt};
 use std::fmt;
-use tokio::{macros::support::Future, net, sync::mpsc};
+use tokio::{macros::support::Future, net, sync::mpsc, time};
 use tokio_util::codec;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -57,7 +57,7 @@ where
     pub fn send(&self, event: T) -> Result<()> {
         if self.receiver.is_some() {
             return Err(Box::new(error::BrokerError::new(
-                error::BrokerErrorKind::Attached,
+                error::BrokerErrorKind::ReceiverAttached,
                 "broker is still attached",
             )));
         };
@@ -137,8 +137,8 @@ where
     pub fn send(&self, event: T) -> Result<()> {
         if self.receiver.is_some() {
             return Err(Box::new(error::BrokerError::new(
-                error::BrokerErrorKind::Attached,
-                "broker is still attached",
+                error::BrokerErrorKind::ReceiverAttached,
+                "receiver is still attached",
             )));
         };
 
@@ -236,8 +236,8 @@ where
     pub fn send(&self, event: ResourceEvent<T>) -> Result<()> {
         if self.receiver.is_some() {
             return Err(Box::new(error::BrokerError::new(
-                error::BrokerErrorKind::Attached,
-                "broker is still attached",
+                error::BrokerErrorKind::ReceiverAttached,
+                "receiver is still attached",
             )));
         };
 
@@ -254,6 +254,7 @@ where
     where
         M: 'static + Send + Sync + fmt::Debug + MatcherMut<ResourceEvent<T>>,
     {
+        // @TODO: Rework this to raise a BrokerError:ReceiverAttached instead
         let receiver = self.receiver.take()?;
 
         self.spawn_and_trace(resource_broker_mut(receiver, matcher));
@@ -277,4 +278,90 @@ where
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+pub struct DelayBroker {
+    sender: mpsc::UnboundedSender<DelayEvent>,
+    receiver: Option<mpsc::UnboundedReceiver<DelayEvent>>,
+}
+
+impl Spawn for DelayBroker {}
+
+impl DelayBroker
+{
+    pub fn send(&self, event: DelayEvent) -> Result<()> {
+        if self.receiver.is_some() {
+            return Err(Box::new(error::BrokerError::new(
+                error::BrokerErrorKind::ReceiverAttached,
+                "receiver is still attached",
+            )));
+        };
+
+        return match self.sender.send(event) {
+            Ok(..) => Ok(()),
+            Err(_) => Err(Box::new(error::BrokerError::new(
+                error::BrokerErrorKind::SenderClosed,
+                "broker sender is closed",
+            ))),
+        };
+    }
+
+    pub fn detach<T>(
+        &mut self,
+        duration: time::Duration,
+        reply_sender: mpsc::UnboundedSender<T>,
+        reply_event: T,
+    ) -> Result<()>
+    where T: 'static + Send + Sync + fmt::Debug,
+    {
+        if let Some(receiver) = self.receiver.take() {
+            self.spawn_and_trace(delayed_task(receiver, duration, reply_sender, reply_event));
+
+            Ok(())
+        } else {
+            Err(Box::new(error::BrokerError::new(
+                error::BrokerErrorKind::ReceiverAttached,
+                "receiver already detached",
+            )))
+        }
+    }
+}
+
+pub async fn delayed_task<T>(
+    mut receiver: mpsc::UnboundedReceiver<DelayEvent>,
+    duration: time::Duration,
+    reply_sender: mpsc::UnboundedSender<T>,
+    reply_event: T,
+) -> Result<()>
+where
+    T: 'static + Send + Sync + fmt::Debug,
+{
+    let sleep = time::sleep(duration);
+    tokio::pin!(sleep);
+
+    loop {
+        tokio::select!(
+            Some(delay_event) = receiver.recv() => {
+                match delay_event {
+                    DelayEvent::Cancel => {
+                        break;
+                    }
+                }
+            }
+            _ = &mut sleep => {
+                if let Err(err) = reply_sender.send(reply_event) {
+                    tracing::error!("{:?}", err);
+                };
+                break;
+            }
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+pub enum DelayEvent {
+    Cancel,
 }

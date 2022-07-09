@@ -29,6 +29,6 @@ impl std::error::Error for BrokerError {}
 
 #[derive(Debug, Clone, Copy)]
 pub enum BrokerErrorKind {
-    Attached,
+    ReceiverAttached,
     SenderClosed,
 }
